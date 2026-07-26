@@ -1,9 +1,3 @@
-
-
-| Release | x86_64 (amd64) |
-|---------|---------|
-| continuous | ✅ (rsync,scp,nfs) |
-
 <!-- arch-label: x86_64 = x86_64 (amd64) -->
 NextBSD publishes no versioned releases: upstream refreshes a single rolling
 `continuous` tag on every push to main. Each builder release tag freezes one

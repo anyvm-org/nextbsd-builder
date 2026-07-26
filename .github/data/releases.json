@@ -1,0 +1,14 @@
+{
+  "os": "nextbsd",
+  "releases": [
+    {
+      "tag": "continuous",
+      "release": "continuous",
+      "arch": "x86_64",
+      "sync": "rsync,scp,nfs",
+      "shutdown": "/sbin/halt -p",
+      "desktop": false,
+      "build": true
+    }
+  ]
+}
