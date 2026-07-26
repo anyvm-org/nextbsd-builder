@@ -1,0 +1,37 @@
+# NextBSD enable-ssh. Piped into the guest's /bin/sh by
+# hooks/host_enablessh.py; build.py's _gen_enablessh_local() appends the
+# host pubkey / authorized_keys block after this file.
+#
+# There is very little to do here: the shipped image ALREADY runs sshd from
+# boot (launchd starts com.openssh.sshd with RunAtLoad + KeepAlive, via
+# /usr/libexec/sshd-keygen-wrapper which creates the host keys on first
+# boot), and its /etc/ssh/sshd_config already sets PermitRootLogin yes +
+# PubkeyAuthentication yes. No sysrc / service(8) exists to enable anything
+# with anyway -- launchd is PID 1 and there is no rc.d.
+
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+
+# AcceptEnv is what every hooks/vm_*.sh needs: run_hook pipes them in over
+# `ssh -o SendEnv=VM_RELEASE`, and the shipped sshd_config has no AcceptEnv
+# line at all. The rest matches what every other anyvm image opens up.
+echo '' >> /etc/ssh/sshd_config
+echo 'AcceptEnv   *' >> /etc/ssh/sshd_config
+echo 'PermitEmptyPasswords yes' >> /etc/ssh/sshd_config
+echo 'StrictModes no' >> /etc/ssh/sshd_config
+
+# The guest's own keypair. main() exports its public half as the
+# <output>-id_rsa.pub release asset (that is how the guest sshes back to the
+# host over slirp); without this the asset is a 0-byte file and the GitHub
+# release upload rejects it.
+rm -f ~/.ssh/id_rsa ~/.ssh/id_rsa.pub
+ssh-keygen -t rsa -f ~/.ssh/id_rsa -q -N ''
+
+# Reload sshd so the config edits take effect. SIGHUP to the master re-execs
+# it and leaves this very session alive; `launchctl stop` (KeepAlive respawns
+# the job) would take our session down with it, so it is only the fallback.
+pkill -HUP -x sshd 2>/dev/null || \
+  kill -HUP "$(cat /var/run/sshd.pid 2>/dev/null)" 2>/dev/null || \
+  launchctl stop com.openssh.sshd 2>/dev/null || true
+
+echo "enable ssh finished."
