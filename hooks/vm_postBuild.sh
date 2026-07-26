@@ -10,7 +10,46 @@
 echo '=================== nextbsd postBuild start ===================='
 
 # ---------------------------------------------------------------------------
-# 1. Serial console.
+# 1. Grow the root filesystem into the disk.
+#
+# createVMFromVHD() does `qemu-img resize +200G`, but NOTHING inside this
+# guest ever grows the partition or the filesystem to match: there is no
+# rc.d, so no growfs_enable, and upstream's image has no first-boot resize of
+# its own. The root therefore stays at the size makefs gave it -- and
+# upstream keeps shrinking that: the 20260724 snapshot had a 5.3G root with
+# 1.3G free, the 20260726 one has 3.1G with 1.4G free.
+#
+# That tight filesystem is what broke the first CI build: `pkg install` died
+# with "Not enough space in /var/cache/pkg, needed 2008 KiB available -227
+# MiB" and sqlite failed the catalogue index with "database or disk is full",
+# both while df reported 1.4G free and 460k free inodes (a 300 MB write and
+# 2000 file creates both succeeded). pkg's own space accounting goes negative
+# on this filesystem; rather than chase that, give it real room.
+#
+# After this the root is ~197G with 180G free and the whole package stage
+# just works. It also fixes the user-visible half of the bug: without it an
+# anyvm user gets a 3.1G root no matter how big the disk is.
+#
+# gpart recover first: growing the backing device leaves the GPT backup
+# header stranded at the old end of the disk, and gpart refuses to resize
+# until that is repaired. Disk name and partition index are derived, not
+# hardcoded, so a VM_DISK change does not silently break this.
+# ---------------------------------------------------------------------------
+_rootdisk=$(gpart show | awk '$1 == "=>" { d = $4 } /freebsd-ufs/ { print d; exit }')
+_rootidx=$(gpart show | awk '/freebsd-ufs/ { print $3; exit }')
+if [ -n "$_rootdisk" ] && [ -n "$_rootidx" ]; then
+	echo "growing ${_rootdisk}p${_rootidx} (freebsd-ufs) into the whole disk"
+	gpart recover "$_rootdisk" || echo "gpart recover failed (already intact?)"
+	gpart resize -i "$_rootidx" "$_rootdisk" || echo "gpart resize failed"
+	growfs -y /dev/ufs/ROOTFS >/dev/null 2>&1 || echo "growfs failed"
+	df -h /
+else
+	echo "WARNING: could not locate the freebsd-ufs partition; not growing"
+	gpart show || true
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Serial console.
 #
 # The stock /boot/loader.conf.d/nextbsd.conf deliberately leaves `console`
 # unset ("the UEFI/BIOS default consoles work for laptops and VMs"), so the
@@ -42,7 +81,7 @@ ANYVMLOADER
 cat /boot/loader.conf.d/anyvm.conf
 
 # ---------------------------------------------------------------------------
-# 2. Bring up networking when the hwregd/ipconfigd attach race loses.
+# 3. Bring up networking when the hwregd/ipconfigd attach race loses.
 #
 # Upstream documents the failure in com.openssh.sshd.plist: "On boots where
 # the hwregd/ipconfigd attach race loses, em0 has no inet and sshd is
@@ -150,7 +189,7 @@ ANYVMPLIST
 # No KeepAlive on purpose: this is a one-shot boot fixup, not a daemon.
 
 # ---------------------------------------------------------------------------
-# 3. /etc/netconfig -- the RPC netconfig database.
+# 4. /etc/netconfig -- the RPC netconfig database.
 #
 # Without it EVERY NFS mount fails at the first step with
 #     tcp: Netconfig database not found
@@ -194,7 +233,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Record what this snapshot actually is. Upstream stamps every build with
+# 5. Record what this snapshot actually is. Upstream stamps every build with
 #    one UTC timestamp shared by the image name, /etc/os-release and
 #    nextbsd-version, so this line identifies the exact snapshot the release
 #    asset was cut from.
