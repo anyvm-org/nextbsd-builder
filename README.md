@@ -14,7 +14,7 @@ All the supported releases are here:
 
 | Release | x86_64 (amd64) |
 |---------|---------|
-| continuous | ✅ (rsync,scp,nfs) |
+| continuous | ✅ (rsync,scp,nfs,tar) |
 
 <!-- arch-label: x86_64 = x86_64 (amd64) -->
 NextBSD publishes no versioned releases: upstream refreshes a single rolling
