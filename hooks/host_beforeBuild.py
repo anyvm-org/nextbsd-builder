@@ -5,8 +5,16 @@
 # its assets; each asset name carries that build's UTC timestamp, e.g.
 # NextBSD-amd64-20260724-211803.img.zip. So a URL written into the conf would
 # 404 the next time upstream pushes -- the conf carries the release
-# COORDINATES (VM_NEXTBSD_REPO / _TAG / _ASSET_SUFFIX) and this hook turns
-# them into the current VM_VHD_LINK.
+# COORDINATES (VM_NEXTBSD_REPO / _TAG / _ASSET_PREFIX / _ASSET_SUFFIX) and this
+# hook turns them into the current VM_VHD_LINK.
+#
+# The PREFIX is what selects the architecture, and it is not optional: since
+# 2026-08-14 the same rolling tag carries amd64 AND arm64 assets, plus an
+# .iso.zip next to each .img.zip. Matching on the suffix alone found 2 hits
+# and killed every build (run 31869194909). Each arch conf names its own
+# prefix ("NextBSD-amd64-" / "NextBSD-arm64-") rather than deriving one from
+# VM_ARCH here, because that mapping is upstream's naming, i.e. data, and it
+# belongs next to the other coordinates in the conf.
 #
 # beforeBuild is the right hook point: it runs before setup() and long before
 # _prep_vhd_disk() reads VM_VHD_LINK, and exec()'ing into build.py's globals
@@ -20,14 +28,16 @@
 
 _nb_repo = env("VM_NEXTBSD_REPO")
 _nb_tag = env("VM_NEXTBSD_TAG")
+_nb_prefix = env("VM_NEXTBSD_ASSET_PREFIX")
 _nb_suffix = env("VM_NEXTBSD_ASSET_SUFFIX")
-if not (_nb_repo and _nb_tag and _nb_suffix):
-    log("FATAL: VM_NEXTBSD_REPO / VM_NEXTBSD_TAG / VM_NEXTBSD_ASSET_SUFFIX "
-        "must all be set by the conf")
+if not (_nb_repo and _nb_tag and _nb_prefix and _nb_suffix):
+    log("FATAL: VM_NEXTBSD_REPO / VM_NEXTBSD_TAG / VM_NEXTBSD_ASSET_PREFIX / "
+        "VM_NEXTBSD_ASSET_SUFFIX must all be set by the conf")
     sys.exit(1)
 
 _nb_api = "https://api.github.com/repos/%s/releases/tags/%s" % (_nb_repo, _nb_tag)
-log("resolving the current %s asset from %s" % (_nb_suffix, _nb_api))
+log("resolving the current %s*%s asset from %s"
+    % (_nb_prefix, _nb_suffix, _nb_api))
 
 _nb_req = urllib.request.Request(_nb_api, headers={
     "Accept": "application/vnd.github+json",
@@ -49,10 +59,11 @@ except Exception as _nb_err:
     sys.exit(1)
 
 _nb_hits = [a for a in _nb_rel.get("assets", [])
-            if a.get("name", "").endswith(_nb_suffix)]
+            if a.get("name", "").startswith(_nb_prefix)
+            and a.get("name", "").endswith(_nb_suffix)]
 if len(_nb_hits) != 1:
-    log("FATAL: expected exactly 1 asset ending in %s on %s@%s, found %d: %s"
-        % (_nb_suffix, _nb_repo, _nb_tag, len(_nb_hits),
+    log("FATAL: expected exactly 1 asset named %s*%s on %s@%s, found %d: %s"
+        % (_nb_prefix, _nb_suffix, _nb_repo, _nb_tag, len(_nb_hits),
            [a.get("name") for a in _nb_rel.get("assets", [])]))
     sys.exit(1)
 

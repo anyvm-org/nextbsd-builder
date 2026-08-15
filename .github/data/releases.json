@@ -9,6 +9,15 @@
       "shutdown": "/sbin/halt -p",
       "desktop": false,
       "build": true
+    },
+    {
+      "tag": "continuous-aarch64",
+      "release": "continuous",
+      "arch": "aarch64",
+      "sync": "rsync,scp,nfs,tar",
+      "shutdown": "/sbin/halt -p",
+      "desktop": false,
+      "build": true
     }
   ]
 }

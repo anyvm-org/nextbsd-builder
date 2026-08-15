@@ -1,4 +1,5 @@
 <!-- arch-label: x86_64 = x86_64 (amd64) -->
+<!-- arch-label: aarch64 = aarch64 (arm64) -->
 NextBSD publishes no versioned releases: upstream refreshes a single rolling
 `continuous` tag on every push to main. Each builder release tag freezes one
 of those snapshots -- `nextbsd-version` and `/etc/os-release` inside the image
