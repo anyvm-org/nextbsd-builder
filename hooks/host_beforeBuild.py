@@ -16,6 +16,19 @@
 # VM_ARCH here, because that mapping is upstream's naming, i.e. data, and it
 # belongs next to the other coordinates in the conf.
 #
+# Prefix + suffix alone is still not enough, and that broke the arm64 build on
+# 2026-08-25: upstream added NextBSD-arm64-rpi5-20260825-134541.img.zip (a
+# Raspberry Pi 5 image), which starts with "NextBSD-arm64-" and ends with
+# ".img.zip" exactly like the virt image does, so the match found 2 again.
+# What separates them is that the generic image carries NOTHING between the
+# arch and the timestamp, so the match is anchored on that timestamp: upstream
+# stamps every build with one UTC <YYYYMMDD>-<HHMMSS> shared by the image
+# name, /etc/os-release and nextbsd-version (observed 20260724-211803,
+# 20260726-002924, 20260814-222643, 20260825-134538/-134547). Any future
+# board-specific or flavoured variant gains a token there and is excluded by
+# construction, rather than by a list of names to skip that grows every time
+# upstream invents one.
+#
 # beforeBuild is the right hook point: it runs before setup() and long before
 # _prep_vhd_disk() reads VM_VHD_LINK, and exec()'ing into build.py's globals
 # means simply assigning os.environ here is enough.
@@ -58,11 +71,14 @@ except Exception as _nb_err:
         % (_nb_tag, _nb_repo, _nb_err))
     sys.exit(1)
 
+# <prefix><YYYYMMDD>-<HHMMSS><suffix>, with nothing else in between.
+_nb_asset_re = re.compile(r"^%s\d{8}-\d{6}%s$"
+                          % (re.escape(_nb_prefix), re.escape(_nb_suffix)))
 _nb_hits = [a for a in _nb_rel.get("assets", [])
-            if a.get("name", "").startswith(_nb_prefix)
-            and a.get("name", "").endswith(_nb_suffix)]
+            if _nb_asset_re.match(a.get("name", ""))]
 if len(_nb_hits) != 1:
-    log("FATAL: expected exactly 1 asset named %s*%s on %s@%s, found %d: %s"
+    log("FATAL: expected exactly 1 asset named %s<timestamp>%s on %s@%s, "
+        "found %d: %s"
         % (_nb_prefix, _nb_suffix, _nb_repo, _nb_tag, len(_nb_hits),
            [a.get("name") for a in _nb_rel.get("assets", [])]))
     sys.exit(1)
