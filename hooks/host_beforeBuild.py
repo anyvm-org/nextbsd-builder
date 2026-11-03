@@ -2,8 +2,8 @@
 #
 # NextBSD publishes no versioned releases. Every push to main that passes the
 # build + boot smoke-test refreshes ONE rolling tag ("continuous"), replacing
-# its assets; each asset name carries that build's UTC timestamp, e.g.
-# NextBSD-amd64-20260724-211803.img.zip. So a URL written into the conf would
+# its assets; each asset name carries that build's stamp, e.g.
+# NextBSD-amd64-27.0.0-165.img.zip. So a URL written into the conf would
 # 404 the next time upstream pushes -- the conf carries the release
 # COORDINATES (VM_NEXTBSD_REPO / _TAG / _ASSET_PREFIX / _ASSET_SUFFIX) and this
 # hook turns them into the current VM_VHD_LINK.
@@ -21,13 +21,20 @@
 # Raspberry Pi 5 image), which starts with "NextBSD-arm64-" and ends with
 # ".img.zip" exactly like the virt image does, so the match found 2 again.
 # What separates them is that the generic image carries NOTHING between the
-# arch and the timestamp, so the match is anchored on that timestamp: upstream
-# stamps every build with one UTC <YYYYMMDD>-<HHMMSS> shared by the image
-# name, /etc/os-release and nextbsd-version (observed 20260724-211803,
-# 20260726-002924, 20260814-222643, 20260825-134538/-134547). Any future
-# board-specific or flavoured variant gains a token there and is excluded by
-# construction, rather than by a list of names to skip that grows every time
-# upstream invents one.
+# arch and the stamp, so the match is anchored on the stamp's shape. Any
+# future board-specific or flavoured variant gains a token there and is
+# excluded by construction, rather than by a list of names to skip that grows
+# every time upstream invents one.
+#
+# The stamp is <version>-<build>: since 2026-11-01 (nextbsd-redux/nextbsd
+# f5272edc, "take the NextBSD version from SystemVersion.plist") it is the
+# installed NextBSD-everything's ProductVersion and ProductBuildVersion, e.g.
+# 27.0.0-165, and upstream falls back to the old UTC <YYYYMMDD>-<HHMMSS>
+# (20260814-222643) for packages that predate the plist. A datestamp is just a
+# version with no dots, so one pattern takes both. Matching only the datestamp
+# is what broke the watcher on 2026-11-01 (found 0 for both arches). Upstream's
+# own workflow tells the two lanes apart the same way: its globs are
+# NextBSD-<arch>-[0-9]*, "the stamp starts with a digit".
 #
 # beforeBuild is the right hook point: it runs before setup() and long before
 # _prep_vhd_disk() reads VM_VHD_LINK, and exec()'ing into build.py's globals
@@ -71,13 +78,14 @@ except Exception as _nb_err:
         % (_nb_tag, _nb_repo, _nb_err))
     sys.exit(1)
 
-# <prefix><YYYYMMDD>-<HHMMSS><suffix>, with nothing else in between.
-_nb_asset_re = re.compile(r"^%s\d{8}-\d{6}%s$"
+# <prefix><version>-<build><suffix>, with nothing else in between. Keep in
+# step with STAMP in hooks/upstream_check.py.
+_nb_asset_re = re.compile(r"^%s\d+(?:\.\d+)*-\d+%s$"
                           % (re.escape(_nb_prefix), re.escape(_nb_suffix)))
 _nb_hits = [a for a in _nb_rel.get("assets", [])
             if _nb_asset_re.match(a.get("name", ""))]
 if len(_nb_hits) != 1:
-    log("FATAL: expected exactly 1 asset named %s<timestamp>%s on %s@%s, "
+    log("FATAL: expected exactly 1 asset named %s<version>-<build>%s on %s@%s, "
         "found %d: %s"
         % (_nb_prefix, _nb_suffix, _nb_repo, _nb_tag, len(_nb_hits),
            [a.get("name") for a in _nb_rel.get("assets", [])]))

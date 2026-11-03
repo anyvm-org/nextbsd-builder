@@ -13,8 +13,8 @@
 # WHY THIS HOOK IS SHAPED DIFFERENTLY FROM EVERY OTHER ONE
 #
 # NextBSD publishes no versions. There is ONE mutable `continuous`
-# prerelease tag, refreshed on every push to main, and the build timestamp
-# lives in the asset NAME (NextBSD-amd64-20260814-222643.img.zip), not in a
+# prerelease tag, refreshed on every push to main, and the build stamp
+# lives in the asset NAME (NextBSD-amd64-27.0.0-165.img.zip), not in a
 # tag. Every conf here therefore carries the literal VM_RELEASE=continuous
 # forever, so watch.py's version comparison has nothing to compare: this
 # hook reports "continuous", decide() finds a conf for it and correctly
@@ -66,11 +66,14 @@ import urllib.request
 
 CONF_DIR = "conf"
 CONF_RE = re.compile(r"^nextbsd-.*\.conf$")
-# The build timestamp that separates a generic image from a board-specific
-# one. Mirrors hooks/host_beforeBuild.py, deliberately: this hook's whole
-# job is to report a change BEFORE the next build hits it, which it can
-# only do by resolving the download exactly the way that hook does.
-TIMESTAMP = r"\d{8}-\d{6}"
+# The build stamp that separates a generic image from a board-specific
+# one: <version>-<build> (27.0.0-165), or the UTC <YYYYMMDD>-<HHMMSS> that
+# upstream falls back to for packages without SystemVersion.plist -- a
+# version with no dots, so one pattern takes both. See the comment in
+# hooks/host_beforeBuild.py. Mirrors that hook, deliberately: this hook's
+# whole job is to report a change BEFORE the next build hits it, which it
+# can only do by resolving the download exactly the way that hook does.
+STAMP = r"\d+(?:\.\d+)*-\d+"
 # Image assets this builder will never build, with the reason. Anything not
 # listed here that no conf claims is reported, so a genuinely new arch still
 # raises the alarm.
@@ -207,13 +210,13 @@ def main():
         c = coords[name]
         key = (c["VM_NEXTBSD_REPO"], c["VM_NEXTBSD_TAG"])
         asset_re = re.compile(
-            "^%s%s%s$" % (re.escape(c["VM_NEXTBSD_ASSET_PREFIX"]), TIMESTAMP,
+            "^%s%s%s$" % (re.escape(c["VM_NEXTBSD_ASSET_PREFIX"]), STAMP,
                           re.escape(c["VM_NEXTBSD_ASSET_SUFFIX"])))
         hits = [a for a in releases[key] if asset_re.match(a)]
         claimed.setdefault(key, set()).update(hits)
         if len(hits) != 1:
             problems.append(
-                "%s: expected exactly 1 asset named %s<timestamp>%s on "
+                "%s: expected exactly 1 asset named %s<version>-<build>%s on "
                 "%s@%s, found %d%s"
                 % (name, c["VM_NEXTBSD_ASSET_PREFIX"],
                    c["VM_NEXTBSD_ASSET_SUFFIX"], key[0], key[1],

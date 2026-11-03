@@ -233,10 +233,98 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Record what this snapshot actually is. Upstream stamps every build with
-#    one UTC timestamp shared by the image name, /etc/os-release and
-#    nextbsd-version, so this line identifies the exact snapshot the release
-#    asset was cut from.
+# 5. FreeBSD ports packages for a plain `pkg install`.
+#
+# Since 2026-10-31 / 11-01 (nextbsd-redux/nextbsd 37a4295d + f535efef)
+# upstream ships ONLY its own repository, /private/etc/pkg/NextBSD.conf: the
+# NextBSD-* meta packages and pkg itself -- no rsync, no tree, no socat. And
+# NextBSD's pkg now computes the ABI NextBSD:27:<arch>, so it refuses FreeBSD
+# packages even from a configured FreeBSD repository ("wrong architecture:
+# FreeBSD:15:amd64 instead of NextBSD:27:amd64"). That broke this builder's
+# package stage and every `pkg install -y socat` in a nextbsd-vm prepare.
+#
+# NextBSD's pkg keeps that door open on purpose. nextbsd-contrib
+# src/pkg/patches/0005-NextBSD-ABI.patch: "An explicit ABI=FreeBSD:15:<arch>
+# (with OSVERSION, or IGNORE_OSVERSION=yes) never goes through the detection
+# and works exactly as before, so a user can still select FreeBSD packages."
+# Upstream's wiki page Installing-Packages
+# (https://github.com/nextbsd-redux/nextbsd/wiki/Installing-Packages) gives
+# the recipe, and the files below follow it to the byte where they can: the
+# signing key under /usr/local/etc/pkg/fingerprints/FreeBSD (the image has
+# no /usr/share/keys/pkg; the key is verbatim FreeBSD releng/15.0
+# share/keys/pkg/trusted/pkg.freebsd.org.2013102301), a repository named
+# FreeBSD in /usr/local/etc/pkg/repos/FreeBSD.conf, ABI FreeBSD:15:<arch>
+# with OSVERSION 1501000 (releng/15.1's __FreeBSD_version, which patch 0005
+# names too) and IGNORE_OSVERSION.
+#
+# It departs from that page in two places, DELIBERATELY, because the wiki
+# makes FreeBSD ports opt-in per command (`ABI=... pkg install -r FreeBSD
+# <pkg>`) and an anyvm image has to keep a plain `pkg install -y <pkg>`
+# working -- the build's VM_INSTALL_CMD and every nextbsd-vm prepare script
+# depend on it, and it is what the image shipped until upstream's change:
+#
+#   * The ABI is pinned in /private/etc/pkg.conf (where NextBSD's pkg reads
+#     its config, patch 0002). The wiki warns against exactly this: it
+#     "makes pkg treat the whole system as FreeBSD", and `pkg upgrade` stops
+#     updating the OS. That is the intended trade-off here -- an anyvm guest
+#     is a snapshot pinned by this builder's release tag, never upgraded in
+#     place.
+#   * So the FreeBSD repository is enabled and the NextBSD one DISABLED (not
+#     removed): with the ABI pinned, NextBSD's NextBSD:27 catalogue is
+#     rejected, and one repository failing to update fails every pkg command
+#     ("Error updating repositories!", exit 3). The override sits in
+#     /usr/local/etc/pkg/repos/, which pkg reads after /private/etc/pkg/, so
+#     upstream's own NextBSD.conf stays byte-identical.
+#
+# To get NextBSD's own setup back: delete the ABI and OSVERSION lines from
+# /private/etc/pkg.conf and the `NextBSD: { enabled: no }` line here, and
+# set the FreeBSD repository to `enabled: no` as the wiki has it.
+#
+# NextBSD's other pkg rules still hold and need nothing from us: pkg itself
+# only ever comes from the repository named NextBSD (patch 0001), and a
+# foreign package may only install under /usr/local/ and /var/ (patch 0004),
+# which is where every FreeBSD port goes. Verified on 27.0.0 (165): rsync,
+# tree and socat install from it and run, `pkg check -d -a` is clean.
+# ---------------------------------------------------------------------------
+_fbsd_abi="FreeBSD:15:$(uname -p)"
+mkdir -p /usr/local/etc/pkg/repos /usr/local/etc/pkg/fingerprints/FreeBSD/trusted
+cat > /usr/local/etc/pkg/fingerprints/FreeBSD/trusted/pkg.freebsd.org.2013102301 <<'ANYVMPKGKEY'
+function: "sha256"
+fingerprint: "b0170035af3acc5f3f3ae1859dc717101b4e6c1d0a794ad554928ca0cbb2f438"
+ANYVMPKGKEY
+cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<ANYVMPKGREPO
+# Written by anyvm-org/nextbsd-builder (hooks/vm_postBuild.sh), after
+# upstream's wiki page Installing-Packages -- except that this repository is
+# enabled and NextBSD's is disabled, because the ABI is pinned in
+# /private/etc/pkg.conf. See the comment in that hook for why and how to undo.
+FreeBSD: {
+  url: "pkg+https://pkg.FreeBSD.org/${_fbsd_abi}/latest",
+  mirror_type: "srv",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/local/etc/pkg/fingerprints/FreeBSD",
+  enabled: yes
+}
+NextBSD: { enabled: no }
+ANYVMPKGREPO
+if ! grep -q '^ABI' /private/etc/pkg.conf 2>/dev/null; then
+	cat >> /private/etc/pkg.conf <<ANYVMPKGCONF
+# Added by anyvm-org/nextbsd-builder (hooks/vm_postBuild.sh): FreeBSD ports
+# are this image's package source. OSVERSION only stops pkg printing
+# "Setting ABI requires setting OSVERSION" on every run.
+ABI = "${_fbsd_abi}";
+OSVERSION = 1501000;
+ANYVMPKGCONF
+fi
+grep -q '^IGNORE_OSVERSION' /private/etc/pkg.conf ||
+	echo "IGNORE_OSVERSION = yes;" >> /private/etc/pkg.conf
+cat /private/etc/pkg.conf
+pkg config ABI
+
+# ---------------------------------------------------------------------------
+# 6. Record what this snapshot actually is. Upstream stamps every build with
+#    one <version> (<build>) pair, from SystemVersion.plist, shared by the
+#    image name, /etc/os-release and nextbsd-version, so this line identifies
+#    the exact snapshot the release asset was cut from.
 # ---------------------------------------------------------------------------
 uname -a
 cat /etc/os-release 2>/dev/null || true
