@@ -233,7 +233,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. FreeBSD ports packages for a plain `pkg install`.
+# 5. An sshd that does not wait on DNS before its banner.
+#
+# FreeBSD's sshd defaults to UseDNS yes, and on login_cap platforms OpenSSH
+# resolves the client's name BEFORE it sends the banner. On the 27.0.0
+# snapshots a libc lookup can stall for ~18 s: measured under anyvm on a WSL
+# host, `getent hosts github.com` blocks in a read() on its TCP query to
+# slirp's DNS (192.168.122.3:53), while drill -- UDP and TCP alike -- gets
+# the same answer from the same server in under a second. (Root cause not
+# pinned down; dropping mdns from nsswitch.conf made no difference.) So the
+# banner took ~15 s, every one of anyvm's 5 s boot probes timed out, and the
+# released v2.0.2 image never came up under anyvm on either boot attempt --
+# the cut-off probes also pile up sshd PerSourcePenalties against the single
+# slirp source.
+#
+# With UseDNS no the banner arrives in 0.02 s, a key-auth ssh takes 1 s and
+# anyvm boots the same image in ~30 s (measured). It goes FIRST in
+# sshd_config -- the first value of a keyword wins, and nothing can then land
+# it inside a Match block -- and the old file is restored if sshd rejects the
+# new one. Nothing here uses hostnames in from= / Match host.
+# ---------------------------------------------------------------------------
+cp -p /etc/ssh/sshd_config /etc/ssh/sshd_config.anyvm-orig
+{
+	echo "# Added by anyvm-org/nextbsd-builder (hooks/vm_postBuild.sh): no"
+	echo "# reverse lookup before the banner. See that hook for why."
+	echo "UseDNS no"
+	grep -v '^[[:space:]]*UseDNS[[:space:]]' /etc/ssh/sshd_config.anyvm-orig
+} > /etc/ssh/sshd_config
+if sshd -t; then
+	echo "sshd_config: UseDNS no"
+else
+	echo "WARNING: sshd rejected the UseDNS edit; restoring the original"
+	cat /etc/ssh/sshd_config.anyvm-orig > /etc/ssh/sshd_config
+fi
+
+# ---------------------------------------------------------------------------
+# 6. FreeBSD ports packages for a plain `pkg install`.
 #
 # Since 2026-10-31 / 11-01 (nextbsd-redux/nextbsd 37a4295d + f535efef)
 # upstream ships ONLY its own repository, /private/etc/pkg/NextBSD.conf: the
@@ -321,7 +356,7 @@ cat /private/etc/pkg.conf
 pkg config ABI
 
 # ---------------------------------------------------------------------------
-# 6. Record what this snapshot actually is. Upstream stamps every build with
+# 7. Record what this snapshot actually is. Upstream stamps every build with
 #    one <version> (<build>) pair, from SystemVersion.plist, shared by the
 #    image name, /etc/os-release and nextbsd-version, so this line identifies
 #    the exact snapshot the release asset was cut from.
