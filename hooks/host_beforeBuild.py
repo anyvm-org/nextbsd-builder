@@ -78,6 +78,8 @@ def _nb_scrub(_text):
     _text = str(_text)
     if _nb_token:
         _text = _text.replace(_nb_token, "<GITHUB_TOKEN>")
+        # repr() escapes a backslash or a quote inside the token.
+        _text = _text.replace(repr(_nb_token)[1:-1], "<GITHUB_TOKEN>")
     return re.sub(r"(?i)bearer\s+[^\s'\"]+", "Bearer <GITHUB_TOKEN>", _text)
 
 
@@ -145,7 +147,14 @@ else:
         with urllib.request.urlopen(urllib.request.Request(
                 _nb_sums_url, headers={"User-Agent": "anyvm-nextbsd-builder"}),
                 timeout=60) as _nb_resp:
+            # The final hop must still be https (no downgrade on redirect).
+            if not _nb_resp.geturl().startswith("https://"):
+                raise ValueError("redirected to a non-https URL")
             _nb_sums = _nb_resp.read(65537)
+            # A short body against a declared Content-Length is a cut-off
+            # transfer; it could hide a second matching line.
+            if len(_nb_sums) <= 65536 and getattr(_nb_resp, "length", None):
+                raise ValueError("incomplete transfer")
         if len(_nb_sums) > 65536:
             raise ValueError("more than 64 KiB")
         _nb_sums = _nb_sums.decode("ascii")
@@ -159,13 +168,16 @@ else:
             "%s" % (_nb_tag, _nb_repo, _nb_api_err, _nb_scrub(
                 "%s: %s" % (type(_nb_err).__name__, _nb_err))))
         sys.exit(1)
-    _nb_lines = [re.fullmatch(r"([0-9a-f]{64}) [ *](\S+)", _l.rstrip("\r"))
+    _nb_lines = [re.fullmatch(r"([0-9a-f]{64})  (\S+)", _l.rstrip("\r"))
                  for _l in _nb_sums.split("\n") if _l.strip()]
     _nb_hits = [m for m in _nb_lines if m and _nb_asset_re.fullmatch(m.group(2))]
     if len(_nb_hits) != 1:
+        # Only names that parsed as `<sha256>  <name>` are shown, never raw
+        # file text.
         log("FATAL: expected exactly 1 line for %s<version>-<build>%s in %s, "
-            "found %d: %r" % (_nb_prefix, _nb_suffix, _nb_sums_url,
-                              len(_nb_hits), _nb_sums[:2000]))
+            "found %d among %s" % (_nb_prefix, _nb_suffix, _nb_sums_url,
+                                   len(_nb_hits), _nb_scrub(
+                                       [m.group(2) for m in _nb_lines if m])))
         sys.exit(1)
     _nb_sha, _nb_name = _nb_hits[0].group(1), _nb_hits[0].group(2)
     _nb_url = _nb_dl_base + _nb_name
