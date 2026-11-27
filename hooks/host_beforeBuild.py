@@ -58,12 +58,13 @@ _nb_req = urllib.request.Request(_nb_api, headers={
 # 2026-11-27 the Desktop arm64 job got "HTTP 403 rate limit exceeded". That
 # is why a failed API call falls back to the release's SHA256SUMS below.
 _nb_token = env("GITHUB_TOKEN")
-# A token with whitespace or control bytes would make http.client raise an
-# error that quotes the header value repr()-escaped -- which no plain
-# replace() of the raw token would catch -- so such a token is refused
-# up front, without printing it.
-if _nb_token and not re.fullmatch(r"[\x21-\x7e]+", _nb_token):
-    log("FATAL: GITHUB_TOKEN contains whitespace or control characters "
+# A token with whitespace, control bytes, quotes or backslashes can show up
+# in an error message escaped (repr() of the header value, in whichever
+# quoting repr picks) where no replace() of the raw token catches it. Real
+# GitHub tokens are [A-Za-z0-9_] only, so anything else is refused up front,
+# without printing it.
+if _nb_token and not re.fullmatch(r"[A-Za-z0-9_.-]+", _nb_token):
+    log("FATAL: GITHUB_TOKEN contains characters a GitHub token never has "
         "(value not shown); fix or unset it")
     sys.exit(1)
 if _nb_token:
@@ -83,13 +84,17 @@ def _nb_scrub(_text):
     return re.sub(r"(?i)bearer\s+[^\s'\"]+", "Bearer <GITHUB_TOKEN>", _text)
 
 
+import http.client
 _nb_api_err = None
 try:
     with urllib.request.urlopen(_nb_req, timeout=60) as _nb_resp:
         _nb_rel = json.loads(_nb_resp.read().decode("utf-8"))
 except urllib.error.HTTPError as _nb_err:
     _nb_api_err = _nb_scrub("HTTP %s %s" % (_nb_err.code, _nb_err.reason))
-except Exception as _nb_err:
+# Only transport and parse failures fall back (OSError covers URLError,
+# DNS, TLS and timeouts; ValueError covers bad JSON / UTF-8 and bad header
+# values); anything else is a bug and must surface, not be routed around.
+except (OSError, ValueError, http.client.HTTPException) as _nb_err:
     _nb_api_err = _nb_scrub("%s: %s" % (type(_nb_err).__name__, _nb_err))
 
 # fullmatch, not ^...$: `$` also matches before a trailing newline.
