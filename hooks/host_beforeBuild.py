@@ -249,11 +249,14 @@ if not os.path.exists(_nb_iso):
 _nb_bios = env("VM_BIOS")
 if _nb_bios and not os.path.exists(_nb_bios):
     log("nextbsd beforeBuild: %s missing, installing ovmf" % _nb_bios)
-    _nb_env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
-    for _nb_apt in (["sudo", "-E", "apt-get", "update", "-qq"],
-                    ["sudo", "-E", "apt-get", "install", "-y", "-qq", "ovmf"]):
+    # Not `sudo -E`: ubuntu-26.04 ships sudo-rs, which ignores -E ("preserving
+    # the entire environment is not supported"), so the variable is passed
+    # through env(1) on the command line instead.
+    _nb_sudo = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get"]
+    for _nb_apt in (_nb_sudo + ["update", "-qq"],
+                    _nb_sudo + ["install", "-y", "-qq", "ovmf"]):
         try:
-            subprocess.run(_nb_apt, env=_nb_env, timeout=900)
+            subprocess.run(_nb_apt, timeout=900)
         except subprocess.TimeoutExpired:
             log("FATAL: %s did not finish within 900 s" % " ".join(_nb_apt))
             sys.exit(1)
