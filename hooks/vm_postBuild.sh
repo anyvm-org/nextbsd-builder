@@ -10,43 +10,19 @@
 echo '=================== nextbsd postBuild start ===================='
 
 # ---------------------------------------------------------------------------
-# 1. Grow the root filesystem into the disk.
+# 1. Nothing to grow any more.
 #
-# createVMFromVHD() does `qemu-img resize +200G`, but NOTHING inside this
-# guest ever grows the partition or the filesystem to match: there is no
-# rc.d, so no growfs_enable, and upstream's image has no first-boot resize of
-# its own. The root therefore stays at the size makefs gave it -- and
-# upstream keeps shrinking that: the 20260724 snapshot had a 5.3G root with
-# 1.3G free, the 20260726 one has 3.1G with 1.4G free.
-#
-# That tight filesystem is what broke the first CI build: `pkg install` died
-# with "Not enough space in /var/cache/pkg, needed 2008 KiB available -227
-# MiB" and sqlite failed the catalogue index with "database or disk is full",
-# both while df reported 1.4G free and 460k free inodes (a 300 MB write and
-# 2000 file creates both succeeded). pkg's own space accounting goes negative
-# on this filesystem; rather than chase that, give it real room.
-#
-# After this the root is ~197G with 180G free and the whole package stage
-# just works. It also fixes the user-visible half of the bug: without it an
-# anyvm user gets a 3.1G root no matter how big the disk is.
-#
-# gpart recover first: growing the backing device leaves the GPT backup
-# header stranded at the old end of the disk, and gpart refuses to resize
-# until that is repaired. Disk name and partition index are derived, not
-# hardcoded, so a VM_DISK change does not silently break this.
+# The prebuilt UFS image this builder booted until 2026-11 had a root only
+# ~1.5 GB larger than its content (pkg's space accounting went negative on
+# it), so this section used to grow it into the disk with gpart + growfs.
+# Since 2026-11-25 the image is INSTALLED (hooks/host_installOpts.py)
+# straight onto build.py's full-size disk, and upstream's installer lays one
+# freebsd-zfs partition over all of it (pool NextBSD, boot environment
+# NextBSD/ROOT/default), so the pool already owns the whole disk. Just
+# record it.
 # ---------------------------------------------------------------------------
-_rootdisk=$(gpart show | awk '$1 == "=>" { d = $4 } /freebsd-ufs/ { print d; exit }')
-_rootidx=$(gpart show | awk '/freebsd-ufs/ { print $3; exit }')
-if [ -n "$_rootdisk" ] && [ -n "$_rootidx" ]; then
-	echo "growing ${_rootdisk}p${_rootidx} (freebsd-ufs) into the whole disk"
-	gpart recover "$_rootdisk" || echo "gpart recover failed (already intact?)"
-	gpart resize -i "$_rootidx" "$_rootdisk" || echo "gpart resize failed"
-	growfs -y /dev/ufs/ROOTFS >/dev/null 2>&1 || echo "growfs failed"
-	df -h /
-else
-	echo "WARNING: could not locate the freebsd-ufs partition; not growing"
-	gpart show || true
-fi
+gpart show || true
+zpool list NextBSD || true
 
 # ---------------------------------------------------------------------------
 # 2. Serial console.
@@ -66,13 +42,25 @@ fi
 #
 # comconsole_speed matches upstream's CI value; QEMU's emulated 16550 ignores
 # the divisor either way (getty runs the 3wire.9600 class on /dev/console).
+#
+# arm64 is different: its EFI loader has no comconsole or vidconsole at all
+# (27.0.0-192 prints "console comconsole is unavailable ... no valid
+# consoles! Available consoles: efi eficom" at every boot), and its `efi`
+# console -- the firmware's ConOut, i.e. the serial line plus the GOP
+# framebuffer under QEMU virt -- is already the default. So arm64 gets
+# console="efi" (stated, so the loader stops complaining) and the same
+# boot_serial / boot_multicons for the kernel.
 # ---------------------------------------------------------------------------
+case "$(uname -p)" in
+aarch64|arm64) _anyvm_console="efi" ;;
+*) _anyvm_console="comconsole,vidconsole" ;;
+esac
 mkdir -p /boot/loader.conf.d
-cat > /boot/loader.conf.d/anyvm.conf <<'ANYVMLOADER'
+cat > /boot/loader.conf.d/anyvm.conf <<ANYVMLOADER
 # Written by anyvm-org/nextbsd-builder (hooks/vm_postBuild.sh).
 # Layered on top of nextbsd.conf: the loader reads every
 # /boot/loader.conf.d/*.conf, so this clobbers nothing upstream ships.
-console="comconsole,vidconsole"
+console="${_anyvm_console}"
 boot_multicons="YES"
 boot_serial="YES"
 comconsole_speed="115200"
@@ -128,10 +116,16 @@ _ifs() {
 	done
 }
 
+# A link-local 169.254.x.x is NOT an address here: since 27.0.0-195
+# ipconfigd falls back to one after ~25 s without a DHCPOFFER ("no DHCP
+# server -- link-local fallback"), and a losing boot then sits on it for
+# good -- its DHCP worker keeps re-sending DISCOVERs that are never
+# answered, while a fresh worker after a link down/up gets the OFFER in
+# seconds (both measured on 27.0.0-195 under slirp).
 _try=0
 while [ "$_try" -lt 120 ]; do
 	for _if in $(_ifs); do
-		if ifconfig "$_if" 2>/dev/null | grep -q 'inet '; then
+		if ifconfig "$_if" 2>/dev/null | grep 'inet ' | grep -qv 'inet 169\.254\.'; then
 			echo "anyvm-netcheck: $_if has an address after ${_try} rounds"
 			exit 0
 		fi
@@ -202,8 +196,9 @@ ANYVMPLIST
 #
 # Content is copied VERBATIM from FreeBSD releng/15.0
 # lib/libc/rpc/netconfig (the branch this userland is built from); it is a
-# fixed table, not something to write from memory. Harmless if upstream ever
-# starts shipping it -- the content is identical.
+# fixed table, not something to write from memory. Upstream has shipped it
+# since (27.0.0-192 has /private/etc/netconfig), so on current snapshots this
+# only prints "already present"; it stays as a guard for a snapshot without.
 # ---------------------------------------------------------------------------
 if [ ! -f /etc/netconfig ]; then
 	cat > /etc/netconfig <<'ANYVMNETCONFIG'
@@ -235,36 +230,15 @@ fi
 # ---------------------------------------------------------------------------
 # 5. An sshd that does not wait on DNS before its banner.
 #
-# FreeBSD's sshd defaults to UseDNS yes, and on login_cap platforms OpenSSH
-# resolves the client's name BEFORE it sends the banner. On the 27.0.0
-# snapshots a libc lookup can stall for ~18 s: measured under anyvm on a WSL
-# host, `getent hosts github.com` blocks in a read() on its TCP query to
-# slirp's DNS (192.168.122.3:53), while drill -- UDP and TCP alike -- gets
-# the same answer from the same server in under a second. (Root cause not
-# pinned down; dropping mdns from nsswitch.conf made no difference.) So the
-# banner took ~15 s, every one of anyvm's 5 s boot probes timed out, and the
-# released v2.0.2 image never came up under anyvm on either boot attempt --
-# the cut-off probes also pile up sshd PerSourcePenalties against the single
-# slirp source.
-#
-# With UseDNS no the banner arrives in 0.02 s, a key-auth ssh takes 1 s and
-# anyvm boots the same image in ~30 s (measured). It goes FIRST in
-# sshd_config -- the first value of a keyword wins, and nothing can then land
-# it inside a Match block -- and the old file is restored if sshd rejects the
-# new one. Nothing here uses hostnames in from= / Match host.
+# Done in enablessh.txt now (see the reasons there): since the image is
+# installed from the ISO, build.py's own ssh readiness probe -- which runs
+# right after enable-ssh, long before this hook -- already needs it. This
+# only reports that it is in place.
 # ---------------------------------------------------------------------------
-cp -p /etc/ssh/sshd_config /etc/ssh/sshd_config.anyvm-orig
-{
-	echo "# Added by anyvm-org/nextbsd-builder (hooks/vm_postBuild.sh): no"
-	echo "# reverse lookup before the banner. See that hook for why."
-	echo "UseDNS no"
-	grep -v '^[[:space:]]*UseDNS[[:space:]]' /etc/ssh/sshd_config.anyvm-orig
-} > /etc/ssh/sshd_config
-if sshd -t; then
-	echo "sshd_config: UseDNS no"
+if grep -q '^UseDNS no' /etc/ssh/sshd_config; then
+	echo "sshd_config: UseDNS no (set by enablessh.txt)"
 else
-	echo "WARNING: sshd rejected the UseDNS edit; restoring the original"
-	cat /etc/ssh/sshd_config.anyvm-orig > /etc/ssh/sshd_config
+	echo "WARNING: sshd_config has no 'UseDNS no' line"
 fi
 
 # ---------------------------------------------------------------------------

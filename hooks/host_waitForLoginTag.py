@@ -2,7 +2,7 @@
 # text.
 #
 # Two NextBSD facts make the default waitForText(VM_LOGIN_TAG) wait wrong for
-# the FIRST boot of a freshly downloaded image:
+# the FIRST boot of a freshly installed disk:
 #
 #   * /boot/loader.conf.d/nextbsd.conf deliberately sets no `console`, so the
 #     kernel talks to vidconsole only and the QEMU serial line stays silent.
@@ -26,10 +26,24 @@
 # on a losing boot leaves em0 with no address and sshd unreachable. A fresh
 # boot usually wins it.
 
+#
+# The race is frequent on 27.0.0-195: ipconfigd's first DHCP worker sends
+# DISCOVERs that are never answered and falls back to a 169.254 address,
+# and it does not recover by itself (ten minutes measured). The same disk
+# lost it on 4 of 11 measured boots, the builder's own first boot twice in
+# a row. A losing boot is therefore cut short and rerolled: the banner
+# normally arrives ~50 s into a KVM boot and ~100-160 s into a TCG one, so
+# each attempt gets 180 s (360 s under aarch64 TCG), five attempts in all
+# -- worst case 15 / 30 minutes, and five losses in a row at the measured
+# rate is about a 1% event. Later boots are covered by the image's own
+# anyvm-netcheck job (hooks/vm_postBuild.sh), which is not on the disk yet
+# on this first boot.
+
 _nb_osname = env("VM_OS_NAME")
 _nb_port = int(read_state(_nb_osname, "sshport") or env("VM_SSH_PORT") or "22")
-_nb_max = int(env("VM_LOGIN_MAX_SECONDS") or 600)
-_nb_attempts = 2
+_nb_max = int(env("VM_LOGIN_MAX_SECONDS")
+              or (360 if env("VM_ARCH") == "aarch64" else 180))
+_nb_attempts = 5
 
 
 def _nb_ssh_banner(port):
@@ -39,7 +53,11 @@ def _nb_ssh_banner(port):
     except OSError:
         return False
     try:
-        s.settimeout(10)
+        # 45 s, not 10: this probe also runs on the first boot of the
+        # freshly installed disk, before enablessh.txt sets `UseDNS no`,
+        # where sshd's reverse lookup can hold the banner back for 15-30 s.
+        # The overall wait stays bounded by _nb_max.
+        s.settimeout(45)
         return s.recv(64).startswith(b"SSH-")
     except OSError:
         return False

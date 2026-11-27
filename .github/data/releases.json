@@ -18,6 +18,24 @@
       "shutdown": "/sbin/halt -p",
       "desktop": false,
       "build": true
+    },
+    {
+      "tag": "continuous-desktop",
+      "release": "continuous-desktop",
+      "arch": "x86_64",
+      "sync": "rsync,scp,nfs,tar",
+      "shutdown": "/sbin/halt -p",
+      "desktop": true,
+      "build": true
+    },
+    {
+      "tag": "continuous-desktop-aarch64",
+      "release": "continuous-desktop",
+      "arch": "aarch64",
+      "sync": "rsync,scp,nfs,tar",
+      "shutdown": "/sbin/halt -p",
+      "desktop": true,
+      "build": true
     }
   ]
 }

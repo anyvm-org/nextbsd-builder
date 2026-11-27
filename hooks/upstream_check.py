@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-# Watch the NextBSD releases page. Prints "continuous" -- the one and only
-# thing this builder's VM_RELEASE can ever be -- when everything upstream
-# still looks the way the confs expect. Empty output means "nothing
-# detected" and is not an error; a non-zero exit means detection found
-# something a human has to deal with, and must be reported by the caller,
-# never swallowed. A failure must NEVER print a plausible-but-wrong version.
+# Watch the NextBSD releases page. Prints "continuous" -- the base of every
+# VM_RELEASE this builder has (continuous, continuous-desktop) -- when
+# everything upstream still looks the way the confs expect. Empty output
+# means "nothing detected" and is not an error; a non-zero exit means
+# detection found something a human has to deal with, and must be reported
+# by the caller, never swallowed. A failure must NEVER print a
+# plausible-but-wrong version.
 #
-# Source of truth: the GitHub releases API for nextbsd-redux/nextbsd, i.e.
-# the machine-readable form of
-# https://github.com/nextbsd-redux/nextbsd/releases
+# Source of truth: the GitHub releases API for nextbsd/nextbsd (renamed from
+# nextbsd-redux/nextbsd in 2026-11), i.e. the machine-readable form of
+# https://github.com/nextbsd/nextbsd/releases
 #
 # WHY THIS HOOK IS SHAPED DIFFERENTLY FROM EVERY OTHER ONE
 #
-# NextBSD publishes no versions. There is ONE mutable `continuous`
-# prerelease tag, refreshed on every push to main, and the build stamp
-# lives in the asset NAME (NextBSD-amd64-27.0.0-165.img.zip), not in a
-# tag. Every conf here therefore carries the literal VM_RELEASE=continuous
+# NextBSD publishes no versions. There are mutable rolling prerelease tags
+# -- since 2026-11-25 `continuous-server` and `continuous-desktop`, which
+# replaced the single `continuous` -- whose assets every upstream build
+# replaces, and the build stamp lives in the asset NAME
+# (NextBSD-Server-amd64-27.0.0-192.iso), not in a tag. Every conf here
+# therefore carries a literal VM_RELEASE (continuous / continuous-desktop)
 # forever, so watch.py's version comparison has nothing to compare: this
 # hook reports "continuous", decide() finds a conf for it and correctly
 # concludes "already has a conf, nothing to do". No conf will ever be
@@ -23,8 +26,10 @@
 # no new release to land.
 #
 # What CAN change on that page, and what this hook actually watches, is the
-# ASSET SET. Both ways it can move have already bitten, on the same
-# upstream push (2026-08-14):
+# TAGS and the ASSET SET. A tag disappearing is a fetch failure (404) and
+# fails the hook: that is how the 2026-11-25 split into server/desktop tags
+# was reported (nextbsd-builder issue #5). The asset set has moved both ways
+# it can, on the same upstream push (2026-08-14):
 #
 #   * A NEW ARCH appeared -- NextBSD-arm64-*.img.zip alongside amd64.
 #     Nothing noticed. The arm64 image went unbuilt until a human happened
@@ -82,8 +87,18 @@ STAMP = r"\d+(?:\.\d+)*-\d+"
 # 8.2.2 that ubuntu-24.04 installs in CI stops at raspi3b (`qemu-system-
 # aarch64 -M help` lists raspi0/1ap/2b/3ap/3b and nothing newer), and anyvm
 # boots this guest on `virt` anyway. Revisit if the runners ever ship a QEMU
-# with a raspi5 machine.
-IGNORE_RE = re.compile(r"^NextBSD-arm64-rpi5-")
+# with a raspi5 machine. Upstream has named it NextBSD-arm64-rpi5-<stamp>
+# and, since the 2026-11-25 split, NextBSD-{Server,Desktop}-rpi5-<stamp>
+# (still .img.zip); any flavour token in front of "rpi5-" is accepted.
+IGNORE_RE = re.compile(r"^NextBSD-(?:[A-Za-z0-9]+-)*rpi5-")
+# What counts as an image asset for the "no conf builds it" check: the
+# suffixes the confs download PLUS every image format upstream has shipped
+# or plausibly would. The confs all say .iso now, so keying on their
+# suffixes alone would let a new arch published as a disk image
+# (NextBSD-Server-riscv64-<stamp>.img.zip, the format amd64/arm64 used
+# until 2026-11-25) slip past unreported.
+IMAGE_SUFFIXES = (".iso", ".img", ".img.zip", ".img.xz", ".img.gz",
+                  ".img.zst", ".qcow2", ".qcow2.zst", ".raw.zst")
 ASSIGN_RE = re.compile(
     r'^\s*(VM_NEXTBSD_REPO|VM_NEXTBSD_TAG|VM_NEXTBSD_ASSET_PREFIX'
     r'|VM_NEXTBSD_ASSET_SUFFIX)=(.*)$')
@@ -134,9 +149,17 @@ def fetch(url):
     # one; its absence is not an error (one call per day is well inside
     # the anonymous limit).
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        headers["Authorization"] = "Bearer %s" % token
+    # A token with whitespace or control bytes would make http.client raise
+    # an error quoting the header value repr()-escaped, past any scrubbing:
+    # refuse it without printing it.
+    if token and not re.fullmatch(r"[\x21-\x7e]+", token):
+        raise ValueError("GITHUB_TOKEN / GH_TOKEN contains whitespace or "
+                         "control characters (value not shown)")
     req = urllib.request.Request(url, headers=headers)
+    if token:
+        # Unredirected: urllib copies ordinary headers onto a redirect, to
+        # any origin; the token is meant for api.github.com only.
+        req.add_unredirected_header("Authorization", "Bearer %s" % token)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
         return resp.read().decode("utf-8", "replace")
 
@@ -164,8 +187,8 @@ def main():
             "resolved: %s\n" % ", ".join(incomplete))
         return 1
 
-    # One fetch per distinct (repo, tag): every conf points at the same
-    # rolling tag today, and a second one would be a deliberate change.
+    # One fetch per distinct (repo, tag): the Server confs share
+    # continuous-server, the Desktop confs continuous-desktop.
     releases = {}
     for name in sorted(coords):
         key = (coords[name]["VM_NEXTBSD_REPO"], coords[name]["VM_NEXTBSD_TAG"])
@@ -175,8 +198,16 @@ def main():
         try:
             body = fetch(url)
         except Exception as e:
+            # Scrubbed: some http.client errors quote the offending header
+            # value verbatim (a token pasted with a newline, say).
+            msg = "%s: %s" % (type(e).__name__, e)
+            for tok in (os.environ.get("GITHUB_TOKEN"),
+                        os.environ.get("GH_TOKEN")):
+                if tok:
+                    msg = msg.replace(tok, "<token>")
+            msg = re.sub(r"(?i)bearer\s+[^\s'\"]+", "Bearer <token>", msg)
             sys.stderr.write("upstream_check: fetch of %s failed: %s\n"
-                             % (url, e))
+                             % (url, msg))
             return 1
         try:
             rel = json.loads(body)
@@ -184,13 +215,14 @@ def main():
             sys.stderr.write("upstream_check: %s did not return JSON: %s\n"
                              % (url, e))
             return 1
-        if not isinstance(rel, dict) or "assets" not in rel:
+        if not isinstance(rel, dict) or not isinstance(rel.get("assets"), list):
             sys.stderr.write(
-                "upstream_check: %s returned no assets field; the API shape "
+                "upstream_check: %s returned no assets list; the API shape "
                 "or the release itself may have changed\n" % url)
             return 1
-        names = [a.get("name") or "" for a in rel.get("assets") or []
-                 if isinstance(a, dict)]
+        names = [a["name"] for a in rel["assets"]
+                 if isinstance(a, dict) and isinstance(a.get("name"), str)
+                 and a["name"]]
         if not names:
             sys.stderr.write(
                 "upstream_check: %s@%s carries no assets at all. Upstream "
@@ -210,9 +242,10 @@ def main():
         c = coords[name]
         key = (c["VM_NEXTBSD_REPO"], c["VM_NEXTBSD_TAG"])
         asset_re = re.compile(
-            "^%s%s%s$" % (re.escape(c["VM_NEXTBSD_ASSET_PREFIX"]), STAMP,
-                          re.escape(c["VM_NEXTBSD_ASSET_SUFFIX"])))
-        hits = [a for a in releases[key] if asset_re.match(a)]
+            "%s%s%s" % (re.escape(c["VM_NEXTBSD_ASSET_PREFIX"]), STAMP,
+                        re.escape(c["VM_NEXTBSD_ASSET_SUFFIX"])))
+        # fullmatch, not ^...$: `$` also matches before a trailing newline.
+        hits = [a for a in releases[key] if asset_re.fullmatch(a)]
         claimed.setdefault(key, set()).update(hits)
         if len(hits) != 1:
             problems.append(
@@ -223,13 +256,14 @@ def main():
                    len(hits), (" (%s)" % ", ".join(hits)) if hits else ""))
 
     # 2. Any image asset no conf claims is an arch (or a variant) upstream
-    #    publishes and this builder does not build. "Image asset" is
-    #    defined by the suffixes the confs themselves use, so the .iso.zip
-    #    and .sha256 assets are correctly ignored rather than pattern-
-    #    matched against a hardcoded arch list.
+    #    publishes and this builder does not build. "Image asset" means
+    #    the confs' own suffixes plus IMAGE_SUFFIXES; SHA256SUMS is never
+    #    one, and the rpi5 board images are ignored by IGNORE_RE rather
+    #    than by a hardcoded arch list.
     for key in sorted(releases):
         suffixes = set(c["VM_NEXTBSD_ASSET_SUFFIX"] for c in coords.values()
                        if (c["VM_NEXTBSD_REPO"], c["VM_NEXTBSD_TAG"]) == key)
+        suffixes.update(IMAGE_SUFFIXES)
         unclaimed = sorted(a for a in releases[key]
                            if any(a.endswith(s) for s in suffixes)
                            and a not in claimed.get(key, set())
@@ -237,7 +271,7 @@ def main():
         if unclaimed:
             problems.append(
                 "%s@%s publishes image asset(s) no conf builds: %s. If this "
-                "is a new architecture, add conf/nextbsd-continuous-<arch>."
+                "is a new architecture, add conf/nextbsd-continuous[-desktop]-<arch>."
                 "conf with its VM_NEXTBSD_ASSET_PREFIX and VM_ARCH (arm64 "
                 "was added this way on 2026-08-15)"
                 % (key[0], key[1], ", ".join(unclaimed)))

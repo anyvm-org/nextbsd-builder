@@ -12,13 +12,53 @@
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 
+# No reverse DNS lookup before the banner. FreeBSD's sshd defaults to
+# UseDNS yes, and on login_cap platforms OpenSSH resolves the client's name
+# BEFORE it sends the banner. On the 27.0.0 snapshots that libc lookup can
+# stall for 15-30 s: measured under anyvm on a WSL host, `getent hosts
+# github.com` blocks in a read() on its TCP query to slirp's DNS
+# (192.168.122.3:53), while drill -- UDP and TCP alike -- gets the same
+# answer from the same server in under a second (root cause not pinned
+# down; dropping mdns from nsswitch.conf made no difference). The released
+# v2.0.2 image never came up under anyvm because of it (5 s boot probes),
+# and on 27.0.0-192 build.py's own readiness probe -- 10 s per attempt,
+# right after this script -- timed out 100 times in a row. With UseDNS no
+# the banner arrives in 0.02 s and a key-auth ssh takes 1 s. Nothing here
+# uses hostnames in from= / Match host.
+#
 # AcceptEnv is what every hooks/vm_*.sh needs: run_hook pipes them in over
 # `ssh -o SendEnv=VM_RELEASE`, and the shipped sshd_config has no AcceptEnv
 # line at all. The rest matches what every other anyvm image opens up.
-echo '' >> /etc/ssh/sshd_config
-echo 'AcceptEnv   *' >> /etc/ssh/sshd_config
-echo 'PermitEmptyPasswords yes' >> /etc/ssh/sshd_config
-echo 'StrictModes no' >> /etc/ssh/sshd_config
+#
+# All of it goes FIRST in sshd_config: the first value of a keyword wins,
+# and nothing can then land inside a Match block. The complete new file is
+# built and checked with `sshd -t -f` before it replaces the live one, so a
+# failed step leaves the live file untouched; any failure ends this script
+# non-zero, which hooks/host_enablessh.py treats as fatal.
+_cfg=/etc/ssh/sshd_config
+_new=/etc/ssh/sshd_config.anyvm-new
+{
+  echo "# Added by anyvm-org/nextbsd-builder (enablessh.txt). UseDNS no: no"
+  echo "# reverse lookup before the banner; see that file for why."
+  echo "UseDNS no"
+  echo "AcceptEnv *"
+  echo "PermitEmptyPasswords yes"
+  echo "StrictModes no"
+  echo ""
+  # Old values of the same keywords go (any case, `Key value` or `Key=value`).
+  # grep -v exits 1 when that leaves no line at all, which is fine; only 2+
+  # (unreadable file) is an error.
+  _rc=0
+  grep -v -i -E '^[[:space:]]*(UseDNS|AcceptEnv|PermitEmptyPasswords|StrictModes)([[:space:]]|=)' "$_cfg" || _rc=$?
+  [ "$_rc" -le 1 ]
+} > "$_new" || { echo "FATAL: cannot build $_new from $_cfg"; exit 1; }
+if ! sshd -t -f "$_new"; then
+  echo "FATAL: sshd rejects the new sshd_config ($_new kept for inspection)"
+  exit 1
+fi
+cat "$_new" > "$_cfg" || { echo "FATAL: cannot replace $_cfg"; exit 1; }
+rm -f "$_new"
+echo "sshd_config: UseDNS no, AcceptEnv *, PermitEmptyPasswords yes, StrictModes no"
 
 # The guest's own keypair. main() exports its public half as the
 # <output>-id_rsa.pub release asset (that is how the guest sshes back to the
