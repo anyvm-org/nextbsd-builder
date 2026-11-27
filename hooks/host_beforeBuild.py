@@ -52,8 +52,11 @@ _nb_req = urllib.request.Request(_nb_api, headers={
     "User-Agent": "anyvm-nextbsd-builder",
 })
 # Anonymous API calls share a 60/hour quota per IP with every other job on
-# the runner. GitHub Actions exports GITHUB_TOKEN to the job; local builds
-# fall back to anonymous (one call per build).
+# the runner IP. A GITHUB_TOKEN in the environment is used when present --
+# but GitHub Actions does NOT export one by itself, and the generated
+# build.yml does not pass it to build.py, so CI calls are anonymous too: on
+# 2026-11-27 the Desktop arm64 job got "HTTP 403 rate limit exceeded". That
+# is why a failed API call falls back to the release's SHA256SUMS below.
 _nb_token = env("GITHUB_TOKEN")
 # A token with whitespace or control bytes would make http.client raise an
 # error that quotes the header value repr()-escaped -- which no plain
@@ -78,60 +81,100 @@ def _nb_scrub(_text):
     return re.sub(r"(?i)bearer\s+[^\s'\"]+", "Bearer <GITHUB_TOKEN>", _text)
 
 
+_nb_api_err = None
 try:
     with urllib.request.urlopen(_nb_req, timeout=60) as _nb_resp:
         _nb_rel = json.loads(_nb_resp.read().decode("utf-8"))
 except urllib.error.HTTPError as _nb_err:
-    log("FATAL: cannot read the %s release of %s: HTTP %s %s"
-        % (_nb_tag, _nb_repo, _nb_err.code, _nb_scrub(_nb_err.reason)))
-    sys.exit(1)
+    _nb_api_err = _nb_scrub("HTTP %s %s" % (_nb_err.code, _nb_err.reason))
 except Exception as _nb_err:
-    log("FATAL: cannot read the %s release of %s: %s: %s"
-        % (_nb_tag, _nb_repo, type(_nb_err).__name__, _nb_scrub(_nb_err)))
-    sys.exit(1)
-# The token is not needed again; do not leave it in build.py's globals.
-del _nb_token, _nb_req
+    _nb_api_err = _nb_scrub("%s: %s" % (type(_nb_err).__name__, _nb_err))
 
-_nb_assets = _nb_rel.get("assets") if isinstance(_nb_rel, dict) else None
-if not isinstance(_nb_assets, list):
-    log("FATAL: the %s release of %s has no asset list" % (_nb_tag, _nb_repo))
-    sys.exit(1)
 # fullmatch, not ^...$: `$` also matches before a trailing newline.
 _nb_asset_re = re.compile(r"%s\d+(?:\.\d+)*-\d+%s"
                           % (re.escape(_nb_prefix), re.escape(_nb_suffix)))
-_nb_hits = [a for a in _nb_assets if isinstance(a, dict)
-            and isinstance(a.get("name"), str)
-            and _nb_asset_re.fullmatch(a["name"])]
-if len(_nb_hits) != 1:
-    log("FATAL: expected exactly 1 asset named %s<version>-<build>%s on %s@%s, "
-        "found %d: %s"
-        % (_nb_prefix, _nb_suffix, _nb_repo, _nb_tag, len(_nb_hits),
-           [a.get("name") for a in _nb_assets if isinstance(a, dict)]))
-    sys.exit(1)
-_nb_asset = _nb_hits[0]
+_nb_dl_base = "https://github.com/%s/releases/download/%s/" % (_nb_repo,
+                                                              _nb_tag)
 
-# The download URL must be the plain release-download URL of exactly this
-# asset -- nothing the API could hand back is passed on unchecked.
-_nb_url = _nb_asset.get("browser_download_url")
-_nb_url_want = "https://github.com/%s/releases/download/%s/%s" % (
-    _nb_repo, _nb_tag, _nb_asset["name"])
-if _nb_url != _nb_url_want:
-    log("FATAL: asset %s has download URL %r, expected %s"
-        % (_nb_asset["name"], _nb_url, _nb_url_want))
-    sys.exit(1)
-_nb_size = _nb_asset.get("size")
-_nb_digest = str(_nb_asset.get("digest") or "")
-_nb_sha = _nb_digest[len("sha256:"):] if _nb_digest.startswith("sha256:") else ""
-if not (type(_nb_size) is int and _nb_size > 0
-        and re.fullmatch(r"[0-9a-f]{64}", _nb_sha)):
-    log("FATAL: asset %s has no usable size / sha256 digest (size=%r, "
-        "digest=%r)" % (_nb_asset["name"], _nb_size, _nb_digest))
-    sys.exit(1)
+if _nb_api_err is None:
+    _nb_assets = _nb_rel.get("assets") if isinstance(_nb_rel, dict) else None
+    if not isinstance(_nb_assets, list):
+        log("FATAL: the %s release of %s has no asset list"
+            % (_nb_tag, _nb_repo))
+        sys.exit(1)
+    _nb_hits = [a for a in _nb_assets if isinstance(a, dict)
+                and isinstance(a.get("name"), str)
+                and _nb_asset_re.fullmatch(a["name"])]
+    if len(_nb_hits) != 1:
+        log("FATAL: expected exactly 1 asset named %s<version>-<build>%s on "
+            "%s@%s, found %d: %s"
+            % (_nb_prefix, _nb_suffix, _nb_repo, _nb_tag, len(_nb_hits),
+               [a.get("name") for a in _nb_assets if isinstance(a, dict)]))
+        sys.exit(1)
+    _nb_asset = _nb_hits[0]
+    _nb_name = _nb_asset["name"]
+
+    # The download URL must be the plain release-download URL of exactly
+    # this asset -- nothing the API could hand back is passed on unchecked.
+    _nb_url = _nb_asset.get("browser_download_url")
+    if _nb_url != _nb_dl_base + _nb_name:
+        log("FATAL: asset %s has download URL %r, expected %s"
+            % (_nb_name, _nb_url, _nb_dl_base + _nb_name))
+        sys.exit(1)
+    _nb_size = _nb_asset.get("size")
+    _nb_digest = str(_nb_asset.get("digest") or "")
+    _nb_sha = (_nb_digest[len("sha256:"):]
+               if _nb_digest.startswith("sha256:") else "")
+    if not (type(_nb_size) is int and _nb_size > 0
+            and re.fullmatch(r"[0-9a-f]{64}", _nb_sha)):
+        log("FATAL: asset %s has no usable size / sha256 digest (size=%r, "
+            "digest=%r)" % (_nb_name, _nb_size, _nb_digest))
+        sys.exit(1)
+    log("upstream build: %s (%d bytes, sha256 %s, updated %s)"
+        % (_nb_name, _nb_size, _nb_sha, _nb_asset.get("updated_at", "?")))
+else:
+    # API unreachable (rate limit, outage): upstream publishes SHA256SUMS
+    # (`<sha256>  <name>` lines, checked 2026-11-27 on both tags) next to
+    # the ISOs. It is fetched from the release-download URL, which is not
+    # API-rate-limited, and gives the same name match and the digest; the
+    # URL is built, never taken from the file. Any failure here is fatal.
+    _nb_sums_url = _nb_dl_base + "SHA256SUMS"
+    log("nextbsd beforeBuild: the releases API failed (%s); resolving from %s"
+        % (_nb_api_err, _nb_sums_url))
+    try:
+        with urllib.request.urlopen(urllib.request.Request(
+                _nb_sums_url, headers={"User-Agent": "anyvm-nextbsd-builder"}),
+                timeout=60) as _nb_resp:
+            _nb_sums = _nb_resp.read(65537)
+        if len(_nb_sums) > 65536:
+            raise ValueError("more than 64 KiB")
+        _nb_sums = _nb_sums.decode("ascii")
+    except urllib.error.HTTPError as _nb_err:
+        log("FATAL: cannot read the %s release of %s: API %s; SHA256SUMS "
+            "%s" % (_nb_tag, _nb_repo, _nb_api_err, _nb_scrub(
+                "HTTP %s %s" % (_nb_err.code, _nb_err.reason))))
+        sys.exit(1)
+    except Exception as _nb_err:
+        log("FATAL: cannot read the %s release of %s: API %s; SHA256SUMS "
+            "%s" % (_nb_tag, _nb_repo, _nb_api_err, _nb_scrub(
+                "%s: %s" % (type(_nb_err).__name__, _nb_err))))
+        sys.exit(1)
+    _nb_lines = [re.fullmatch(r"([0-9a-f]{64}) [ *](\S+)", _l.rstrip("\r"))
+                 for _l in _nb_sums.split("\n") if _l.strip()]
+    _nb_hits = [m for m in _nb_lines if m and _nb_asset_re.fullmatch(m.group(2))]
+    if len(_nb_hits) != 1:
+        log("FATAL: expected exactly 1 line for %s<version>-<build>%s in %s, "
+            "found %d: %r" % (_nb_prefix, _nb_suffix, _nb_sums_url,
+                              len(_nb_hits), _nb_sums[:2000]))
+        sys.exit(1)
+    _nb_sha, _nb_name = _nb_hits[0].group(1), _nb_hits[0].group(2)
+    _nb_url = _nb_dl_base + _nb_name
+    log("upstream build: %s (sha256 %s, from SHA256SUMS)" % (_nb_name, _nb_sha))
+
+# The token is not needed again; do not leave it in build.py's globals.
+del _nb_token, _nb_req
 
 os.environ["VM_ISO_LINK"] = _nb_url
-log("upstream build: %s (%d bytes, sha256 %s, updated %s)"
-    % (_nb_asset["name"], _nb_size, _nb_sha,
-       _nb_asset.get("updated_at", "?")))
 log("VM_ISO_LINK=%s" % _nb_url)
 
 
@@ -149,7 +192,7 @@ def _nb_file_sha256(_path):
 # VM_OS_NAME (nextbsd), so the ISO a failed Server build leaves behind -- or
 # a partial download, which build.py preallocates to full length -- would
 # otherwise be booted by the next build. So: keep a pre-placed file only
-# when its sha256 is the digest the API publishes for the asset just
+# when its sha256 is the digest the API (or SHA256SUMS) gives for the asset just
 # resolved; otherwise download to a .part file, check its digest, and only
 # then move it into place. Nothing unverified is ever booted.
 _nb_iso = wf("%s.iso" % env("VM_OS_NAME"))
@@ -169,7 +212,7 @@ if not os.path.exists(_nb_iso):
                 else "<no file>")
     if _nb_have != _nb_sha:
         log("FATAL: downloaded %s has sha256 %s, the asset's digest is %s"
-            % (_nb_asset["name"], _nb_have, _nb_sha))
+            % (_nb_name, _nb_have, _nb_sha))
         try:
             os.remove(_nb_part)
         except OSError:
