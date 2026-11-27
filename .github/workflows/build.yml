@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["continuous", "continuous-aarch64"]
+        os: ["continuous", "continuous-aarch64", "continuous-desktop", "continuous-desktop-aarch64"]
     runs-on: ubuntu-26.04
     steps:
 #    - name: Free Disk Space (Ubuntu)
